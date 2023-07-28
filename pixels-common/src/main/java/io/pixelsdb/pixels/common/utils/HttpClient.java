@@ -8,7 +8,7 @@ public class HttpClient {
     public static void main(String[] args) throws IOException {
         AsyncHttpClient httpClient = Dsl.asyncHttpClient();
 
-        String serverIpAddress = "192.168.0.x"; // Replace with the actual IP address of the server
+        String serverIpAddress = "127.0.0.1"; // Replace with the actual IP address of the server
         int serverPort = 8080; // Replace with the actual port number of the server
 
         try {
@@ -17,7 +17,7 @@ public class HttpClient {
             String json = JSON.toJSONString(i);
             System.out.println("Sending Object: " + json);
 
-            Request request = httpClient.preparePost("http://" + serverIpAddress + ":" + serverPort + "/receive-object")
+            Request request = httpClient.prepareGet("http://" + serverIpAddress + ":" + serverPort + "/")
                     .addFormParam("json", json)
                     .build();
 

@@ -8,15 +8,20 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
+import io.netty.handler.ssl.SslContext;
 
 /**
  * An HTTP server that sends back the content of the received HTTP request
  * in a pretty plaintext form.
  */
 public final class HttpServer {
-    static final int PORT = Integer.parseInt(System.getProperty("port", "8080"));
+
+    static final boolean SSL = System.getProperty("ssl") != null;
+    static final int PORT = Integer.parseInt(System.getProperty("port", SSL? "8443" : "8080"));
 
     public static void main(String[] args) throws Exception {
+        // Configure SSL.
+        final SslContext sslCtx = HttpServerUtil.buildSslContext();
 
         // Configure the server.
         EventLoopGroup bossGroup = new NioEventLoopGroup(1);
@@ -27,12 +32,12 @@ public final class HttpServer {
             b.group(bossGroup, workerGroup)
                     .channel(NioServerSocketChannel.class)
                     .handler(new LoggingHandler(LogLevel.INFO))
-                    .childHandler(new HttpServerInitializer());
+                    .childHandler(new HttpServerInitializer(sslCtx));
 
             Channel ch = b.bind(PORT).sync().channel();
 
             System.err.println("Open your web browser and navigate to " +
-                    "http" + "://127.0.0.1:" + PORT + '/');
+                    (SSL? "https" : "http") + "://127.0.0.1:" + PORT + '/');
 
             ch.closeFuture().sync();
         } finally {
