@@ -1,0 +1,85 @@
+/*
+ * Copyright 2023 PixelsDB.
+ *
+ * This file is part of Pixels.
+ *
+ * Pixels is free software: you can redistribute it and/or modify
+ * it under the terms of the Affero GNU General Public License as
+ * published by the Free Software Foundation, either version 3 of
+ * the License, or (at your option) any later version.
+ *
+ * Pixels is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * Affero GNU General Public License for more details.
+ *
+ * You should have received a copy of the Affero GNU General Public
+ * License along with Pixels.  If not, see
+ * <https://www.gnu.org/licenses/>.
+ */
+
+// Streaming format definition, for query pipelining
+
+syntax = "proto3";
+
+package pixelsStream.proto;
+
+option java_package = "io.pixelsdb.pixels.common";
+option java_outer_classname = "CommonProto";  // ?
+
+message PipMsg {
+  optional string magic = 1;
+  optional uint32 metadataLength = 2;
+  optional Metadata metadata = 3;
+  // padding???
+  // msgBody - rawbytes added with http append()
+}
+
+message Metadata {
+  uint32 version = 1;
+  repeated Type types = 2;
+  uint32 bodyLength = 3;
+  repeated bool isNull = 4;  // boolean[]
+  bool noNulls = 5;
+}
+
+message Type {
+  enum Kind {  // which ColumnVector is it
+    BINARY = 0;
+    BYTE = 1;
+    DATE = 2;
+    DECIMAL = 3;
+    DICT = 4;
+    DOUBLE = 5;
+    LONG = 6;
+    LONGDECIMAL = 7;
+    STRUCT = 8;
+    TIME = 9;
+    TIMESTAMP = 10;
+  }
+  optional Kind kind = 1;
+//  optional string name = 2;
+//  repeated uint32 subtypes = 3 [packed=true];
+//  optional uint32 maximumLength = 4;
+//  optional uint32 precision = 5;
+//  optional uint32 scale = 6;
+}
+
+/*
+message ColumnStatistic {
+  optional uint64 numberOfValues = 1;
+  optional IntegerStatistic intStatistics = 2;
+  optional DoubleStatistic doubleStatistics = 3;
+  optional StringStatistic stringStatistics = 4;
+  optional BucketStatistic bucketStatistics = 5;
+  optional BinaryStatistic binaryStatistics = 6;
+  optional TimestampStatistic timestampStatistics = 7;
+  // Date and Time types are added in Issue #94,
+  // use field number 9 and 10 for compatibility.
+  optional DateStatistic dateStatistics = 9;
+  optional TimeStatistic timeStatistics = 10;
+  // Integer128 is added for long decimal in Issue #203.
+  optional Integer128Statistic int128Statistics = 11;
+  optional bool hasNull = 8;
+}
+*/

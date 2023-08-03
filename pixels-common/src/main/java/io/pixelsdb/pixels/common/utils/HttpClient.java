@@ -1,8 +1,10 @@
 package io.pixelsdb.pixels.common.utils;
+import io.pixelsdb.pixels.common.CommonProto;
 import org.asynchttpclient.*;
 import com.alibaba.fastjson.JSON;
 
 import java.io.IOException;
+import java.util.Objects;
 
 public class HttpClient {
     public static void main(String[] args) throws IOException {
@@ -23,6 +25,10 @@ public class HttpClient {
 
             Response response = httpClient.executeRequest(request).get();
             System.out.println("HTTP response status code: " + response.getStatusCode());
+            if (Objects.equals(response.getContentType(), "application/x-protobuf")) {
+                CommonProto.Metadata metadata = CommonProto.Metadata.parseFrom(response.getResponseBodyAsBytes());
+                System.out.println("Parsed object: " + metadata);
+            }
         } catch (Exception e) {
             e.printStackTrace();
         } finally {
