@@ -4,15 +4,15 @@
 
 #include "vector/LongColumnVector.h"
 
-LongColumnVector::LongColumnVector(int len, bool encoding, bool isLong): ColumnVector(len, encoding) {
+LongColumnVector::LongColumnVector(uint64_t len, bool encoding, bool isLong): ColumnVector(len, encoding) {
 	if(encoding) {
 		if(isLong) {
-            posix_memalign(reinterpret_cast<void **>(&longVector), 4096,
+            posix_memalign(reinterpret_cast<void **>(&longVector), 32,
                            len * sizeof(int64_t));
 			intVector = nullptr;
 		} else {
 			longVector = nullptr;
-            posix_memalign(reinterpret_cast<void **>(&intVector), 4096,
+            posix_memalign(reinterpret_cast<void **>(&intVector), 32,
                            len * sizeof(int32_t));
 		}
 	} else {
@@ -20,6 +20,7 @@ LongColumnVector::LongColumnVector(int len, bool encoding, bool isLong): ColumnV
 		intVector = nullptr;
 	}
 
+    this->isLong = isLong;
     memoryUsage += (long) sizeof(long) * len;
 }
 
@@ -49,4 +50,20 @@ LongColumnVector::~LongColumnVector() {
 	if(!closed) {
 		LongColumnVector::close();
 	}
+}
+
+void * LongColumnVector::current() {
+    if(isLong) {
+        if(longVector == nullptr) {
+            return nullptr;
+        } else {
+            return longVector + readIndex;
+        }
+    } else {
+        if(intVector == nullptr) {
+            return nullptr;
+        } else {
+            return intVector + readIndex;
+        }
+    }
 }

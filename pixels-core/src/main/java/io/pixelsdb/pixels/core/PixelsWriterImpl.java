@@ -38,6 +38,7 @@ import org.apache.logging.log4j.Logger;
 import javax.annotation.concurrent.NotThreadSafe;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Optional;
@@ -68,6 +69,22 @@ public class PixelsWriterImpl implements PixelsWriter
 {
     private static final Logger LOGGER = LogManager.getLogger(PixelsWriterImpl.class);
 
+    static final ByteOrder WRITER_ENDIAN;
+
+    static
+    {
+        boolean littleEndian = Boolean.parseBoolean(
+                ConfigFactory.Instance().getProperty("column.chunk.little.endian"));
+        if (littleEndian)
+        {
+            WRITER_ENDIAN = ByteOrder.LITTLE_ENDIAN;
+        }
+        else
+        {
+            WRITER_ENDIAN = ByteOrder.BIG_ENDIAN;
+        }
+    }
+
     private final TypeDescription schema;
     private final int pixelStride;
     private final int rowGroupSize;
@@ -77,6 +94,14 @@ public class PixelsWriterImpl implements PixelsWriter
     private final boolean encoding;
     private final boolean partitioned;
     private final Optional<List<Integer>> partKeyColumnIds;
+    /**
+     * The number of bytes that each column chunk is aligned to.
+     */
+    private final int chunkAlignment;
+    /**
+     * The byte buffer padded to each column chunk for alignment.
+     */
+    private final byte[] chunkPaddingBuffer;
 
     private final ColumnWriter[] columnWriters;
     private final StatsRecorder[] fileColStatRecorders;
@@ -101,14 +126,6 @@ public class PixelsWriterImpl implements PixelsWriter
     private final List<TypeDescription> children;
 
     private final ExecutorService columnWriterService = Executors.newCachedThreadPool();
-    /**
-     * The number of bytes that each column chunk is aligned to.
-     */
-    private final int chunkAlignment;
-    /**
-     * The byte buffer padded to each column chunk for alignment.
-     */
-    private final byte[] chunkPaddingBuffer;
 
     private PixelsWriterImpl(
             TypeDescription schema,
@@ -135,6 +152,7 @@ public class PixelsWriterImpl implements PixelsWriter
         this.partitioned = partitioned;
         this.partKeyColumnIds = requireNonNull(partKeyColumnIds, "partKeyColumnIds is null");
         this.chunkAlignment = Integer.parseInt(ConfigFactory.Instance().getProperty("column.chunk.alignment"));
+        checkArgument(this.chunkAlignment >= 0, "column.chunk.alignment must >= 0");
         this.chunkPaddingBuffer = new byte[this.chunkAlignment];
         children = schema.getChildren();
         checkArgument(!requireNonNull(children, "schema is null").isEmpty(), "schema is empty");
@@ -142,7 +160,7 @@ public class PixelsWriterImpl implements PixelsWriter
         fileColStatRecorders = new StatsRecorder[children.size()];
         for (int i = 0; i < children.size(); ++i)
         {
-            columnWriters[i] = newColumnWriter(children.get(i), pixelStride, encoding);
+            columnWriters[i] = newColumnWriter(children.get(i), pixelStride, encoding, WRITER_ENDIAN);
             fileColStatRecorders[i] = StatsRecorder.create(children.get(i));
         }
 
@@ -281,8 +299,7 @@ public class PixelsWriterImpl implements PixelsWriter
             return this;
         }
 
-        public PixelsWriter build()
-                throws PixelsWriterException
+        public PixelsWriter build() throws PixelsWriterException
         {
             requireNonNull(this.builderStorage, "storage is not set");
             requireNonNull(this.builderFilePath, "file path is not set");
@@ -398,8 +415,7 @@ public class PixelsWriterImpl implements PixelsWriter
     }
 
     @Override
-    public boolean addRowBatch(VectorizedRowBatch rowBatch)
-            throws IOException
+    public boolean addRowBatch(VectorizedRowBatch rowBatch) throws IOException
     {
         checkArgument(!partitioned, "this file is hash partitioned, " +
                 "use addRowBatch(rowBatch, hashValue) instead");
@@ -497,8 +513,7 @@ public class PixelsWriterImpl implements PixelsWriter
         }
     }
 
-    private void writeRowGroup()
-            throws IOException
+    private void writeRowGroup() throws IOException
     {
         int rowGroupDataLength = 0;
 
@@ -517,6 +532,16 @@ public class PixelsWriterImpl implements PixelsWriter
             // flush writes the isNull bit map into the internal output stream.
             writer.flush();
             rowGroupDataLength += writer.getColumnChunkSize();
+            if (chunkAlignment != 0 && rowGroupDataLength % chunkAlignment != 0)
+            {
+                /*
+                 * Issue #519:
+                 * This is necessary as the prepare() method of some storage (e.g., hdfs)
+                 * has to determine whether to start a new block, if the current block
+                 * is not large enough.
+                 */
+                rowGroupDataLength += chunkAlignment - rowGroupDataLength % chunkAlignment;
+            }
         }
 
         // write and flush row group content
@@ -525,25 +550,40 @@ public class PixelsWriterImpl implements PixelsWriter
             curRowGroupOffset = physicalWriter.prepare(rowGroupDataLength);
             if (curRowGroupOffset != -1)
             {
+                // Issue #519: make sure to start writing the column chunks in the row group from an aligned offset.
+                int tryAlign = 0;
+                while (chunkAlignment != 0 && curRowGroupOffset % chunkAlignment != 0 && tryAlign++ < 2)
+                {
+                    int alignBytes = (int) (chunkAlignment - curRowGroupOffset % chunkAlignment);
+                    physicalWriter.append(chunkPaddingBuffer, 0, alignBytes);
+                    writtenBytes += alignBytes;
+                    curRowGroupOffset = physicalWriter.prepare(rowGroupDataLength);
+                }
+                if (tryAlign > 2)
+                {
+                    LOGGER.warn("failed to align the start offset of the column chunks in the row group");
+                    throw new IOException("failed to align the start offset of the column chunks in the row group");
+                }
+
                 for (ColumnWriter writer : columnWriters)
                 {
                     byte[] rowGroupBuffer = writer.getColumnChunkContent();
                     physicalWriter.append(rowGroupBuffer, 0, rowGroupBuffer.length);
                     writtenBytes += rowGroupBuffer.length;
                     // add align bytes to make sure the column size is the multiple of fsBlockSize
-                    if(rowGroupBuffer.length % chunkAlignment != 0)
+                    if(chunkAlignment != 0 && rowGroupBuffer.length % chunkAlignment != 0)
                     {
-                        int alignByte = chunkAlignment - rowGroupBuffer.length % chunkAlignment;
-                        physicalWriter.append(chunkPaddingBuffer, 0, alignByte);
-                        writtenBytes += alignByte;
+                        int alignBytes = chunkAlignment - rowGroupBuffer.length % chunkAlignment;
+                        physicalWriter.append(chunkPaddingBuffer, 0, alignBytes);
+                        writtenBytes += alignBytes;
                     }
                 }
                 physicalWriter.flush();
             }
             else
             {
-                LOGGER.warn("Write row group prepare failed");
-                throw new IOException("Write row group prepare failed");
+                LOGGER.warn("write row group prepare failed");
+                throw new IOException("write row group prepare failed");
             }
         }
         catch (IOException e)
@@ -561,9 +601,16 @@ public class PixelsWriterImpl implements PixelsWriter
             chunkIndexBuilder.setChunkOffset(curRowGroupOffset + rowGroupDataLength);
             chunkIndexBuilder.setChunkLength(writer.getColumnChunkSize());
             rowGroupDataLength += writer.getColumnChunkSize();
-            if((curRowGroupOffset + rowGroupDataLength) % chunkAlignment != 0)
+            if(chunkAlignment != 0 && rowGroupDataLength % chunkAlignment != 0)
             {
-                rowGroupDataLength += (int) (chunkAlignment - (curRowGroupOffset + rowGroupDataLength) % chunkAlignment);
+                /*
+                 * Issue #519:
+                 * This line must be consistent with how column chunks are padded above.
+                 * If we only pad after each column chunk when writing it into the physical writer
+                 * without checking the alignment of the current position of the physical writer,
+                 * then we should not consider curRowGroupOffset when calculating the alignment here.
+                 */
+                rowGroupDataLength += chunkAlignment - rowGroupDataLength % chunkAlignment;
             }
             // collect columnChunkIndex from every column chunk into curRowGroupIndex
             curRowGroupIndex.addColumnChunkIndexEntries(chunkIndexBuilder.build());
@@ -580,7 +627,7 @@ public class PixelsWriterImpl implements PixelsWriter
              * We temporarily fix this problem by creating a new column writer for each row group.
              */
             // writer.reset();
-            columnWriters[i] = newColumnWriter(children.get(i), pixelStride, encoding);
+            columnWriters[i] = newColumnWriter(children.get(i), pixelStride, encoding, WRITER_ENDIAN);
         }
 
         // put curRowGroupIndex into rowGroupFooter
@@ -627,8 +674,7 @@ public class PixelsWriterImpl implements PixelsWriter
         this.fileContentLength += rowGroupDataLength;
     }
 
-    private void writeFileTail()
-            throws IOException
+    private void writeFileTail() throws IOException
     {
         PixelsProto.Footer footer;
         PixelsProto.PostScript postScript;
@@ -649,7 +695,6 @@ public class PixelsWriterImpl implements PixelsWriter
         {
             footerBuilder.addRowGroupStats(rowGroupStatistic);
         }
-        footerBuilder.setPartitioned(partitioned);
         footer = footerBuilder.build();
 
         // build PostScript
@@ -661,6 +706,8 @@ public class PixelsWriterImpl implements PixelsWriter
                 .setCompressionBlockSize(compressionBlockSize)
                 .setPixelStride(pixelStride)
                 .setWriterTimezone(timeZone.getDisplayName())
+                .setPartitioned(partitioned)
+                .setColumnChunkAlignment(chunkAlignment)
                 .setMagic(Constants.MAGIC)
                 .build();
 

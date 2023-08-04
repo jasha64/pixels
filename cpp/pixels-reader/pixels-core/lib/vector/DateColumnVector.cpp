@@ -4,9 +4,9 @@
 
 #include "vector/DateColumnVector.h"
 
-DateColumnVector::DateColumnVector(int len, bool encoding): ColumnVector(len, encoding) {
+DateColumnVector::DateColumnVector(uint64_t len, bool encoding): ColumnVector(len, encoding) {
 	if(encoding) {
-        posix_memalign(reinterpret_cast<void **>(&dates), 4096,
+        posix_memalign(reinterpret_cast<void **>(&dates), 32,
                        len * sizeof(int32_t));
 	} else {
 		this->dates = nullptr;
@@ -49,4 +49,12 @@ void DateColumnVector::set(int elementNum, int days) {
 	}
 	dates[elementNum] = days;
 	// TODO: isNull
+}
+
+void * DateColumnVector::current() {
+    if(dates == nullptr) {
+        return nullptr;
+    } else {
+        return dates + readIndex;
+    }
 }

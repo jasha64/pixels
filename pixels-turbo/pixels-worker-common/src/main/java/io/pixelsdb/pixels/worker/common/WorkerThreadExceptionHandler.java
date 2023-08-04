@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2019 PixelsDB.
+ * Copyright 2023 PixelsDB.
  *
  * This file is part of Pixels.
  *
@@ -17,29 +17,36 @@
  * License along with Pixels.  If not, see
  * <https://www.gnu.org/licenses/>.
  */
-package io.pixelsdb.pixels.core.encoding;
+package io.pixelsdb.pixels.worker.common;
 
-import java.io.IOException;
+import org.apache.logging.log4j.Logger;
+
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * @author guodong
  * @author hank
+ * @create 2023-07-31
  */
-public class RunLenByteDecoder extends Decoder
+public class WorkerThreadExceptionHandler implements Thread.UncaughtExceptionHandler
 {
-    @Override
-    public boolean hasNext() throws IOException
+    private final Logger logger;
+    private final AtomicBoolean hasException;
+
+    public WorkerThreadExceptionHandler(Logger logger)
     {
-        return false;
+        this.logger = logger;
+        this.hasException = new AtomicBoolean(false);
     }
 
     @Override
-    public void close()
+    public void uncaughtException(Thread t, Throwable e)
     {
+        logger.error(String.format("error occurred in thread: %s", t.getName()), e);
+        hasException.set(true);
     }
 
-    public byte next()
+    public boolean hasException()
     {
-        return (byte) 1;
+        return hasException.get();
     }
 }

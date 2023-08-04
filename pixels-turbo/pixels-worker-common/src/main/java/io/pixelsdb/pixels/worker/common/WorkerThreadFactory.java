@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2019 PixelsDB.
+ * Copyright 2023 PixelsDB.
  *
  * This file is part of Pixels.
  *
@@ -17,22 +17,28 @@
  * License along with Pixels.  If not, see
  * <https://www.gnu.org/licenses/>.
  */
-package io.pixelsdb.pixels.core.reader;
+package io.pixelsdb.pixels.worker.common;
 
-import io.pixelsdb.pixels.core.TypeDescription;
+import java.util.concurrent.ThreadFactory;
 
 /**
- * This class is the same as String and Varchar column reader.
- * It does not pad zeros at the end of a value for performance reasons.
- * @author guodong
  * @author hank
+ * @create 2023-07-31
  */
-public class CharColumnReader extends StringColumnReader
+public class WorkerThreadFactory implements ThreadFactory
 {
-    // This class is implemented in Issue #100.
+    private final WorkerThreadExceptionHandler exceptionHandler;
 
-    CharColumnReader(TypeDescription type)
+    public WorkerThreadFactory(WorkerThreadExceptionHandler exceptionHandler)
     {
-        super(type);
+        this.exceptionHandler = exceptionHandler;
+    }
+
+    @Override
+    public Thread newThread(Runnable r)
+    {
+        final Thread thread = new Thread(r);
+        thread.setUncaughtExceptionHandler(exceptionHandler);
+        return thread;
     }
 }
