@@ -22,10 +22,10 @@ import static io.netty.handler.codec.http.HttpHeaderValues.KEEP_ALIVE;
 import static io.netty.handler.codec.http.HttpResponseStatus.OK;
 
 public class HttpServerHandler extends SimpleChannelInboundHandler<HttpObject> {
-    private byte[] payload = { 'H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd' };
+    private final byte[] payload = { 'H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd' };
 
-    public HttpServerHandler() {}
-    public HttpServerHandler(byte[] a) {payload = a;}
+//    public HttpServerHandler() {}
+//    public HttpServerHandler(byte[] a) {payload = a;}
 
     @Override
     public void channelReadComplete(ChannelHandlerContext ctx) {
@@ -46,11 +46,10 @@ public class HttpServerHandler extends SimpleChannelInboundHandler<HttpObject> {
             combinedBuffer.put(payload);
             combinedBuffer.put(messageBytes);
             FullHttpResponse response = new DefaultFullHttpResponse(req.protocolVersion(), OK,
-                    Unpooled.wrappedBuffer(combinedBuffer));
+                    Unpooled.wrappedBuffer(messageBytes));
             response.headers()
                     .set(CONTENT_TYPE, "application/x-protobuf")
-                    .setInt(CONTENT_LENGTH, messageBytes.length) // response.content().readableBytes())
-                    .set(CONNECTION, KEEP_ALIVE);
+                    .setInt(CONTENT_LENGTH, messageBytes.length); // response.content().readableBytes())
 
             if (keepAlive) {
                 if (!req.protocolVersion().isKeepAliveDefault()) {
