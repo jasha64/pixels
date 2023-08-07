@@ -11,6 +11,7 @@ import io.netty.handler.codec.http.HttpObject;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpUtil;
 import io.pixelsdb.pixels.common.CommonProto;
+import org.apache.commons.lang3.ArrayUtils;
 
 import java.nio.ByteBuffer;
 
@@ -42,14 +43,17 @@ public class HttpServerHandler extends SimpleChannelInboundHandler<HttpObject> {
                     .setBodyLength(1)
                     .build();
             byte[] messageBytes = message.toByteArray();
-            ByteBuffer combinedBuffer = ByteBuffer.allocate(payload.length + messageBytes.length);
-            combinedBuffer.put(payload);
-            combinedBuffer.put(messageBytes);
+            byte[] combinedMessage = ArrayUtils.addAll(payload, messageBytes);
+//            ByteBuffer combinedBuffer = ByteBuffer.allocate(payload.length + messageBytes.length);
+//            combinedBuffer.put(payload);
+//            combinedBuffer.put(messageBytes);
+//            System.out.println(combinedBuffer);
             FullHttpResponse response = new DefaultFullHttpResponse(req.protocolVersion(), OK,
-                    Unpooled.wrappedBuffer(messageBytes));
+                    Unpooled.wrappedBuffer(combinedMessage));
             response.headers()
                     .set(CONTENT_TYPE, "application/x-protobuf")
-                    .setInt(CONTENT_LENGTH, messageBytes.length); // response.content().readableBytes())
+                    .setInt(CONTENT_LENGTH, response.content().readableBytes());
+//            System.out.println(response.content().readableBytes());
 
             if (keepAlive) {
                 if (!req.protocolVersion().isKeepAliveDefault()) {

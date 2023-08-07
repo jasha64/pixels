@@ -16,6 +16,7 @@ import io.pixelsdb.pixels.core.PixelsReader;
 import io.pixelsdb.pixels.core.PixelsReaderImpl;
 import io.pixelsdb.pixels.core.reader.PixelsReaderOption;
 import io.pixelsdb.pixels.core.reader.PixelsRecordReader;
+import io.pixelsdb.pixels.core.vector.ColumnVector;
 import io.pixelsdb.pixels.core.vector.DictionaryColumnVector;
 import io.pixelsdb.pixels.core.vector.LongColumnVector;
 import io.pixelsdb.pixels.core.vector.VectorizedRowBatch;
@@ -56,7 +57,8 @@ public class TestHttpServerClient {
         option.skipCorruptRecords(true);
         option.tolerantSchemaEvolution(true);
         option.enableEncodedColumnVector(true);
-        option.includeCols(new String[]{"n_nationkey", "n_name", "n_regionkey"});
+        String[] colNames = new String[]{"n_nationkey", "n_name", "n_regionkey"};
+        option.includeCols(colNames);
 //        option.rgRange(0, 1);
 //        option.transId(1);
         PixelsRecordReader recordReader = reader.read(option);
@@ -72,10 +74,28 @@ public class TestHttpServerClient {
                 if (msg instanceof HttpRequest) {
                     HttpRequest req = (HttpRequest) msg;
 
-                    CommonProto.Metadata message = CommonProto.Metadata.newBuilder()
-                            .setBodyLength(2)
-                            .build();
-                    byte[] messageBytes = message.toByteArray();
+                    CommonProto.Metadata.Builder message = CommonProto.Metadata.newBuilder();
+//                            .addTypes(typeBuild.setName("n_nationkey").setKind(CommonProto.Type.Kind.LONG).build())
+//                            .addTypes(typeBuild.setName("n_name").setKind(CommonProto.Type.Kind.DICT).build())
+//                            .addTypes(typeBuild.setName("n_regionkey").setKind(CommonProto.Type.Kind.LONG).build())
+                    CommonProto.Type.Builder typeBuild = CommonProto.Type.newBuilder();
+                    // 似乎把Pixels文件读到内存里的时候丢弃了column names (PixelsRecordReaderImpl.java: 215)。
+                    // 所以这里只能依靠前面的option.includeCols(new String[]{"n_nationkey", "n_name", "n_regionkey"});
+                    // 作为列名。
+                    for (int i = 0; i < rowBatch.cols.length; i++) {
+                        ColumnVector col = rowBatch.cols[i];
+                        typeBuild.setName(colNames[i]);
+                        if (col instanceof LongColumnVector) {
+                            typeBuild.setKind(CommonProto.Type.Kind.LONG).build();
+                        } else if (col instanceof DictionaryColumnVector) {
+                            typeBuild.setKind(CommonProto.Type.Kind.DICT).build();
+                        } else {
+                            typeBuild.setKind(CommonProto.Type.Kind.LONG).build();
+                        }
+                        message.addTypes(typeBuild.build());
+                    }
+
+                    byte[] messageBytes = message.build().toByteArray();
                     ByteBuffer combinedBuffer = ByteBuffer.allocate(messageBytes.length);
                     combinedBuffer.put(messageBytes);
                     FullHttpResponse response = new DefaultFullHttpResponse(req.protocolVersion(), OK,
