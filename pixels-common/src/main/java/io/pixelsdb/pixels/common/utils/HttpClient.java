@@ -4,6 +4,7 @@ import org.asynchttpclient.*;
 import com.alibaba.fastjson.JSON;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Objects;
 
@@ -27,8 +28,9 @@ public class HttpClient {
             Response response = httpClient.executeRequest(request).get();
             System.out.println("HTTP response status code: " + response.getStatusCode());
             if (Objects.equals(response.getContentType(), "application/x-protobuf")) {
-                System.out.println(response.getResponseBodyAsBytes());
-                CommonProto.Metadata metadata = CommonProto.Metadata.parseFrom(Arrays.copyOfRange(response.getResponseBodyAsBytes(), 11, response.getResponseBodyAsBytes().length));
+                int messageLength = ByteBuffer.wrap(response.getResponseBodyAsBytes()).getInt(6);
+                System.out.println("Parsed objLength: " + messageLength);
+                CommonProto.Metadata metadata = CommonProto.Metadata.parseFrom(Arrays.copyOfRange(response.getResponseBodyAsBytes(), 10, 10 + messageLength));
                 System.out.println("Parsed object: " + metadata);
             }
         } catch (Exception e) {

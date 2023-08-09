@@ -1,16 +1,17 @@
 package io.pixelsdb.pixels.worker.common;
 
-import com.google.common.collect.ImmutableList;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.handler.codec.http.*;
+import io.netty.handler.codec.http.DefaultFullHttpResponse;
+import io.netty.handler.codec.http.FullHttpResponse;
+import io.netty.handler.codec.http.HttpObject;
+import io.netty.handler.codec.http.HttpRequest;
 import io.pixelsdb.pixels.common.CommonProto;
-import io.pixelsdb.pixels.common.physical.PhysicalReader;
-import io.pixelsdb.pixels.common.physical.PhysicalReaderUtil;
 import io.pixelsdb.pixels.common.physical.Storage;
 import io.pixelsdb.pixels.common.physical.StorageFactory;
+import io.pixelsdb.pixels.common.utils.Constants;
 import io.pixelsdb.pixels.core.PixelsFooterCache;
 import io.pixelsdb.pixels.core.PixelsReader;
 import io.pixelsdb.pixels.core.PixelsReaderImpl;
@@ -20,17 +21,13 @@ import io.pixelsdb.pixels.core.vector.ColumnVector;
 import io.pixelsdb.pixels.core.vector.DictionaryColumnVector;
 import io.pixelsdb.pixels.core.vector.LongColumnVector;
 import io.pixelsdb.pixels.core.vector.VectorizedRowBatch;
+import org.apache.commons.lang3.ArrayUtils;
 import org.junit.Test;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.security.cert.CertificateException;
-import java.util.List;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.*;
-import static io.netty.handler.codec.http.HttpHeaderNames.CONNECTION;
 import static io.netty.handler.codec.http.HttpHeaderValues.CLOSE;
-import static io.netty.handler.codec.http.HttpHeaderValues.KEEP_ALIVE;
 import static io.netty.handler.codec.http.HttpResponseStatus.OK;
 import static io.pixelsdb.pixels.storage.s3.Minio.ConfigMinio;
 
@@ -95,19 +92,37 @@ public class TestHttpServerClient {
                         message.addTypes(typeBuild.build());
                     }
 
-                    byte[] messageBytes = message.build().toByteArray();
-                    ByteBuffer combinedBuffer = ByteBuffer.allocate(messageBytes.length);
-                    combinedBuffer.put(messageBytes);
+                    byte[] magicBytes = Constants.MAGIC.getBytes();  // 6 bytes
+                    byte[] messageBytes = message.build().toByteArray();  // 4 bytes
+                    int messageLength = messageBytes.length;
+                    byte[] messageLengthBytes = ByteBuffer.allocate(4).putInt(messageLength).array();
+                    int paddingLength = (magicBytes.length + messageLengthBytes.length + messageLength) % 8;
+                    byte[] paddingBytes = new byte[paddingLength];
+                    // todo message body
+
+                    byte[] combinedMessage =
+                            ArrayUtils.addAll(
+                            ArrayUtils.addAll(
+                            ArrayUtils.addAll(
+                            magicBytes, messageLengthBytes), messageBytes), paddingBytes);
+//                    System.out.println(combinedMessage.length);
                     FullHttpResponse response = new DefaultFullHttpResponse(req.protocolVersion(), OK,
-                            Unpooled.wrappedBuffer(messageBytes));
+                            Unpooled.wrappedBuffer(combinedMessage));
                     response.headers()
                             .set(CONTENT_TYPE, "application/x-protobuf")
-                            .setInt(CONTENT_LENGTH, messageBytes.length);
+                            .setInt(CONTENT_LENGTH, response.content().readableBytes());
 
                     // serve only once, so that we pass the test instead of hanging
                     response.headers().set(CONNECTION, CLOSE);
-                    ChannelFuture f = ctx.write(response);
-                    f.addListener(ChannelFutureListener.CLOSE);
+                    ChannelFuture f = ctx.writeAndFlush(response);
+//                    f.addListener(ChannelFutureListener.CLOSE);
+//                    ctx.close();
+                    ctx.writeAndFlush(Unpooled.EMPTY_BUFFER)
+                            .addListener(ChannelFutureListener.CLOSE)
+                            .addListener(future -> {
+                                // Gracefully shutdown the server after the channel is closed
+                                ctx.channel().parent().close().addListener(ChannelFutureListener.CLOSE);
+                            });
                 }
             }
         });

@@ -28,13 +28,14 @@ public class HttpServerHandler extends SimpleChannelInboundHandler<HttpObject> {
 //    public HttpServerHandler() {}
 //    public HttpServerHandler(byte[] a) {payload = a;}
 
-    @Override
-    public void channelReadComplete(ChannelHandlerContext ctx) {
-        ctx.flush();
-    }
+//    @Override
+//    public void channelReadComplete(ChannelHandlerContext ctx) {
+//        ctx.flush();
+//    }
 
     @Override
     public void channelRead0(ChannelHandlerContext ctx, HttpObject msg) {
+        // demo and default handler
         if (msg instanceof HttpRequest) {
             HttpRequest req = (HttpRequest) msg;
 
