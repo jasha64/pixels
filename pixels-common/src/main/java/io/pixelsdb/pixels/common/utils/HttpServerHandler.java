@@ -5,12 +5,12 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
-import io.netty.channel.ChannelHandler;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpObject;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpUtil;
+import io.pixelsdb.pixels.common.CommonProto;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.CONNECTION;
 import static io.netty.handler.codec.http.HttpHeaderNames.CONTENT_LENGTH;
@@ -19,7 +19,6 @@ import static io.netty.handler.codec.http.HttpHeaderValues.CLOSE;
 import static io.netty.handler.codec.http.HttpHeaderValues.KEEP_ALIVE;
 import static io.netty.handler.codec.http.HttpResponseStatus.OK;
 
-@ChannelHandler.Sharable
 public class HttpServerHandler extends SimpleChannelInboundHandler<HttpObject> {
     private final byte[] payload = { 'H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd' };
 
@@ -38,11 +37,16 @@ public class HttpServerHandler extends SimpleChannelInboundHandler<HttpObject> {
             HttpRequest req = (HttpRequest) msg;
 
             boolean keepAlive = HttpUtil.isKeepAlive(req);
+            CommonProto.Metadata message = CommonProto.Metadata.newBuilder()
+                    .setBodyLength(1)
+                    .build();
+            byte[] messageBytes = message.toByteArray();
             FullHttpResponse response = new DefaultFullHttpResponse(req.protocolVersion(), OK,
-                    Unpooled.wrappedBuffer(payload));
+                    Unpooled.wrappedBuffer(payload, messageBytes));
             response.headers()
-                    .set(CONTENT_TYPE, "text/plain")
+                    .set(CONTENT_TYPE, "application/x-protobuf")
                     .setInt(CONTENT_LENGTH, response.content().readableBytes());
+            // System.out.println(response.content().readableBytes());
 
             if (keepAlive) {
                 if (!req.protocolVersion().isKeepAliveDefault()) {
