@@ -57,6 +57,18 @@
             <artifactId>netty-buffer</artifactId>
         </dependency>
 
+        <!-- asynchttpclient -->
+        <dependency>
+            <groupId>org.asynchttpclient</groupId>
+            <artifactId>async-http-client</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-all</artifactId>
+            <optional>true</optional>
+        </dependency>
+
         <!-- google -->
         <dependency>
             <groupId>com.google.guava</groupId>
