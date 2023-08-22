@@ -1,5 +1,3 @@
-package io.pixelsdb.pixels.worker.common;
-
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
@@ -12,7 +10,7 @@ import io.netty.handler.codec.http.HttpRequest;
 import io.pixelsdb.pixels.common.CommonProto;
 import io.pixelsdb.pixels.common.physical.Storage;
 import io.pixelsdb.pixels.common.physical.StorageFactory;
-import io.pixelsdb.pixels.common.utils.Constants;
+import io.pixelsdb.pixels.common.utils.*;
 import io.pixelsdb.pixels.core.PixelsFooterCache;
 import io.pixelsdb.pixels.core.PixelsReaderImpl;
 import io.pixelsdb.pixels.core.reader.PixelsReaderOption;
@@ -20,8 +18,6 @@ import io.pixelsdb.pixels.core.reader.PixelsRecordReader;
 import io.pixelsdb.pixels.core.vector.DictionaryColumnVector;
 import io.pixelsdb.pixels.core.vector.LongColumnVector;
 import io.pixelsdb.pixels.core.vector.VectorizedRowBatch;
-import io.pixelsdb.pixels.common.utils.HttpServer;
-import io.pixelsdb.pixels.common.utils.HttpServerHandler;
 
 import java.util.Arrays;
 import java.util.Objects;
@@ -29,15 +25,15 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import org.junit.Test;
 import org.asynchttpclient.*;
+import org.junit.Test;
 
 import java.nio.ByteBuffer;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.*;
 import static io.netty.handler.codec.http.HttpHeaderValues.CLOSE;
 import static io.netty.handler.codec.http.HttpResponseStatus.OK;
-import static io.pixelsdb.pixels.storage.s3.Minio.ConfigMinio;
+// import static io.pixelsdb.pixels.storage.s3.Minio.ConfigMinio;
 
 public class TestHttpServerClient {
 
@@ -46,14 +42,15 @@ public class TestHttpServerClient {
         final ByteBuf buffer = Unpooled.buffer(); // Unpooled.directBuffer();
 //        System.out.println(buffer.capacity());
 
-        ConfigMinio("dummy-region", "http://hp114.utah.cloudlab.us:9000", "r6SwdB3efI126soLlz4N", "VZOqv43UL94T8G90td1XbVU0kOG7wdexB8Y6dVdL");
-        Storage minio = StorageFactory.Instance().getStorage(Storage.Scheme.minio);
+//        ConfigMinio("dummy-region", "http://hp.utah.cloudlab.us:9000", "", "");
+//        Storage minio = StorageFactory.Instance().getStorage(Storage.Scheme.minio);
 //        System.out.println(minio.listPaths("pixels-tpch/").size() + " .pxl files on Minio");
 //        List<String> files = minio.listPaths("pixels-tpch/customer/");
 
+        Storage fileStorage = StorageFactory.Instance().getStorage(Storage.Scheme.file);
         PixelsReaderImpl.Builder reader = PixelsReaderImpl.newBuilder()
-                .setStorage(minio)
-                .setPath("pixels-tpch/nation/v-0-ordered/20230814143629_105.pxl")
+                .setStorage(fileStorage)
+                .setPath("/home/jasha/pixels-tpch/nation/v-0-ordered/20230814143629_105.pxl")
                 .setEnableCache(false)
                 .setPixelsFooterCache(new PixelsFooterCache());
 //        for (String file : files)
@@ -226,8 +223,7 @@ public class TestHttpServerClient {
         }
 
         int difference = multiple - remainder;
-        int ceiling = value + difference;
-        return ceiling;
+        return value + difference;
     }
 
     @Test
@@ -281,17 +277,14 @@ public class TestHttpServerClient {
         }, 1);
     }
 
-
     @Test
     public void testClientConcurrent() {
-        testClientSimple(); testClientSimple();
-
-//        runAsync(() -> {
-//            try {
-//                testClientSimple();
-//            } catch (Exception e) {
-//                e.printStackTrace();
-//            }
-//        }, 3);
+        runAsync(() -> {
+            try {
+                testClientSimple();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }, 3);
     }
 }
