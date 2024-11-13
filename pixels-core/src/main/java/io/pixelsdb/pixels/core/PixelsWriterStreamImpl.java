@@ -582,13 +582,8 @@ public class PixelsWriterStreamImpl implements PixelsWriter
                         .addHeader(CONNECTION, CLOSE)
                         .build();
 
-                outstandingHTTPRequestSemaphore.acquire();
-                Response response = httpClient.executeRequest(req).get();
-                if (response.getStatusCode() != 200)
-                {
-                    throw new IOException("Failed to send close request to server. Is the server already closed? " +
-                            "HTTP status code: " + response.getStatusCode());
-                }
+//                outstandingHTTPRequestSemaphore.acquire();
+                httpClient.executeRequest(req);
             }
 
             for (ColumnWriter cw : columnWriters)
@@ -776,106 +771,104 @@ public class PixelsWriterStreamImpl implements PixelsWriter
         logger.debug("Sending row group to endpoint: " + reqUri + ", length: " + byteBuf.writerIndex()
                 + ", partitionId: " + partitionId);
         Request req = httpClient.preparePost(reqUri)
-                .setBody(byteBuf.nioBuffer())
+                .setBody(byteBuf.copy().nioBuffer())
                 .addHeader("X-Partition-Id", String.valueOf(partitionId))
                 .addHeader(CONTENT_TYPE, "application/x-protobuf")
                 .addHeader(CONTENT_LENGTH, byteBuf.readableBytes())
                 .addHeader(CONNECTION, partitioned || partitionId == PARTITION_ID_SCHEMA_WRITER ? CLOSE : "keep-alive")
                 .build();
+        byteBuf.clear();
         // If it's partitioned mode, we send only 1 row group to each upper-level worker, and so we set the connection to
         //  CLOSE after sending the row group.
         // If it's a schema writer, we should also close the connection after sending the row group.
 
         // DESIGN: We use a retry here to retry the HTTP request in case of connection failure,
         //  because the HTTP server may not be ready when the client tries to connect.
-        try
-        {
-            outstandingHTTPRequestSemaphore.acquire();
-            int maxAttempts = 30000;
-            long backoffMillis = 10;
-            int attempt = 0;
-            boolean success = false;
-
-            while (!success)
+        new Thread(() -> {
+            try
             {
-                try
+//            outstandingHTTPRequestSemaphore.acquire();
+                int maxAttempts = 3000;
+                long backoffMillis = 100;
+                int attempt = 0;
+                boolean success = false;
+
+                while (!success)
                 {
-                    CompletableFuture<Response> future = new CompletableFuture<>();
-                    httpClient.executeRequest(req, new AsyncCompletionHandler<Response>() {
-
-                        @Override
-                        public Response onCompleted(Response response) throws Exception
-                        {
-                            byteBuf.clear();
-                            future.complete(response);
-                            if (response.getStatusCode() != 200)
-                            {
-                                throw new IOException("Failed to send row group to server, status code: " + response.getStatusCode());
-                            }
-                            outstandingHTTPRequestSemaphore.release();
-                            return response;
-                        }
-
-                        @Override
-                        public void onThrowable(Throwable t)
-                        {
-                            if (t instanceof java.net.ConnectException)
-                            {
-                                future.completeExceptionally(t);
-                            }
-                            else
-                            {
-                                byteBuf.clear();
-                                logger.error(t.getMessage());
-                                outstandingHTTPRequestSemaphore.release();
-                                future.completeExceptionally(t);
-                            }
-                        }
-                    });
-
-                    future.get();
-                    // If no exception, the request was successful, so we break out of the loop
-                    success = true;
-                }
-                catch (ExecutionException e)
-                {
-                    Throwable cause = e.getCause();
-                    if (cause instanceof java.net.ConnectException)
+                    try
                     {
-                        attempt++;
-                        if (attempt < maxAttempts)
+                        CompletableFuture<Response> future = new CompletableFuture<>();
+                        httpClient.executeRequest(req, new AsyncCompletionHandler<Response>()
                         {
-                            try
+
+                            @Override
+                            public Response onCompleted(Response response) throws Exception
                             {
-                                Thread.sleep(backoffMillis);
+                                // byteBuf.clear();
+                                future.complete(response);
+                                if (response.getStatusCode() != 200)
+                                {
+                                    throw new IOException("Failed to send row group to server, status code: " +
+                                            response.getStatusCode());
+                                }
+//                            outstandingHTTPRequestSemaphore.release();
+                                return response;
                             }
-                            catch (InterruptedException interruptedException)
+
+                            @Override
+                            public void onThrowable(Throwable t)
                             {
-                                Thread.currentThread().interrupt();
-                                throw new RuntimeException("Retry interrupted", interruptedException);
+                                if (t instanceof java.net.ConnectException)
+                                {
+                                    future.completeExceptionally(t);
+                                } else
+                                {
+                                    // byteBuf.clear();
+                                    logger.error(t.getMessage());
+//                                outstandingHTTPRequestSemaphore.release();
+                                    future.completeExceptionally(t);
+                                }
                             }
-                        }
-                        else
-                        {
-                            throw new RuntimeException("Max retry attempts reached. Failing the request.", cause);
-                        }
-                    }
-                    else
+                        });
+
+                        future.get();
+                        // If no exception, the request was successful, so we break out of the loop
+                        success = true;
+                    } catch (ExecutionException e)
                     {
-                        throw new RuntimeException("Non-retryable error occurred", cause);
+                        Throwable cause = e.getCause();
+                        if (cause instanceof java.net.ConnectException)
+                        {
+                            attempt++;
+                            if (attempt < maxAttempts)
+                            {
+                                try
+                                {
+                                    Thread.sleep(backoffMillis);
+                                } catch (InterruptedException interruptedException)
+                                {
+                                    Thread.currentThread().interrupt();
+                                    throw new RuntimeException("Retry interrupted", interruptedException);
+                                }
+                            } else
+                            {
+                                throw new RuntimeException("Max retry attempts reached. Failing the request.", cause);
+                            }
+                        } else
+                        {
+                            throw new RuntimeException("Non-retryable error occurred", cause);
+                        }
+                    } catch (InterruptedException e)
+                    {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("Retry interrupted", e);
                     }
                 }
-                catch (InterruptedException e)
-                {
-                    Thread.currentThread().interrupt();
-                    throw new RuntimeException("Retry interrupted", e);
-                }
+            } catch (Throwable e)
+            {
+                logger.error("error when sending data", e);
             }
-        }
-        catch (Throwable e)
-        {
-            logger.error("error when sending data", e);
-        }
+        }).start();
         this.rowGroupNum++;
         // In `getNumRowGroup()`, we use rowGroupNum to count the number of row groups sent. So we need to increment
         //  `rowGroupNum` at the end of this method.
