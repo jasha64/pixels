@@ -20,6 +20,8 @@
 package io.pixelsdb.pixels.core;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.pixelsdb.pixels.common.utils.ConfigFactory;
 import io.pixelsdb.pixels.common.utils.Constants;
@@ -146,7 +148,8 @@ public class PixelsWriterStreamImpl implements PixelsWriter
     private int currHashValue = 0;
     private final int partitionId;
 
-    private final ByteBuf byteBuf;
+    ByteBufAllocator byteBufAllocator = PooledByteBufAllocator.DEFAULT;
+    private ByteBuf byteBuf;
     /**
      * DESIGN: We only translate fileName to URI when we need to send a row group to the server, rather than at
      *  construction time. This is because the getPort() call is blocking, and so it's better to postpone it as much as
@@ -256,7 +259,7 @@ public class PixelsWriterStreamImpl implements PixelsWriter
             columnWriters[i] = newColumnWriter(children.get(i), columnWriterOption);
         }
 
-        this.byteBuf = Unpooled.directBuffer();
+        this.byteBuf = byteBufAllocator.buffer();
         this.uri = uri;
         this.fileName = fileName;
         this.uris = fileNames == null ? null : fileNames.stream().map(URI::create).collect(Collectors.toList());
@@ -508,6 +511,8 @@ public class PixelsWriterStreamImpl implements PixelsWriter
                 writeRowGroup();
                 curRowGroupNumOfRows = 0L;
             }
+            // XXX: Consider also imposing a row group size limit here like in non-partitioned mode,
+            //  to better enforce the operator pipelining optimization.
         }
         currHashValue = hashValue;
         hashValueIsSet = true;
@@ -771,13 +776,13 @@ public class PixelsWriterStreamImpl implements PixelsWriter
         logger.debug("Sending row group to endpoint: " + reqUri + ", length: " + byteBuf.writerIndex()
                 + ", partitionId: " + partitionId);
         Request req = httpClient.preparePost(reqUri)
-                .setBody(byteBuf.copy().nioBuffer())
+                .setBody(byteBuf.nioBuffer())
                 .addHeader("X-Partition-Id", String.valueOf(partitionId))
                 .addHeader(CONTENT_TYPE, "application/x-protobuf")
                 .addHeader(CONTENT_LENGTH, byteBuf.readableBytes())
                 .addHeader(CONNECTION, partitioned || partitionId == PARTITION_ID_SCHEMA_WRITER ? CLOSE : "keep-alive")
                 .build();
-        byteBuf.clear();
+        byteBuf = byteBufAllocator.buffer();
         // If it's partitioned mode, we send only 1 row group to each upper-level worker, and so we set the connection to
         //  CLOSE after sending the row group.
         // If it's a schema writer, we should also close the connection after sending the row group.
@@ -804,7 +809,6 @@ public class PixelsWriterStreamImpl implements PixelsWriter
                             @Override
                             public Response onCompleted(Response response) throws Exception
                             {
-                                // byteBuf.clear();
                                 future.complete(response);
                                 if (response.getStatusCode() != 200)
                                 {
@@ -823,7 +827,6 @@ public class PixelsWriterStreamImpl implements PixelsWriter
                                     future.completeExceptionally(t);
                                 } else
                                 {
-                                    // byteBuf.clear();
                                     logger.error(t.getMessage());
 //                                outstandingHTTPRequestSemaphore.release();
                                     future.completeExceptionally(t);
