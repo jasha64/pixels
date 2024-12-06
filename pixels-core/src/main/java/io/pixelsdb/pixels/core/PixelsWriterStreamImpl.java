@@ -775,6 +775,7 @@ public class PixelsWriterStreamImpl implements PixelsWriter
         String reqUri = partitioned ? uris.get(currHashValue).toString() : uri.toString();
         logger.debug("Sending row group to endpoint: " + reqUri + ", length: " + byteBuf.writerIndex()
                 + ", partitionId: " + partitionId);
+        ByteBuf oldByteBuf = byteBuf;
         Request req = httpClient.preparePost(reqUri)
                 .setBody(byteBuf.nioBuffer())
                 .addHeader("X-Partition-Id", String.valueOf(partitionId))
@@ -809,6 +810,7 @@ public class PixelsWriterStreamImpl implements PixelsWriter
                             @Override
                             public Response onCompleted(Response response) throws Exception
                             {
+                                oldByteBuf.release();
                                 future.complete(response);
                                 if (response.getStatusCode() != 200)
                                 {
@@ -822,6 +824,7 @@ public class PixelsWriterStreamImpl implements PixelsWriter
                             @Override
                             public void onThrowable(Throwable t)
                             {
+                                oldByteBuf.release();
                                 if (t instanceof java.net.ConnectException)
                                 {
                                     future.completeExceptionally(t);
