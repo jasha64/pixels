@@ -92,7 +92,8 @@ public class HttpServerHandler extends SimpleChannelInboundHandler<HttpObject>
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause)
     {
-        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, INTERNAL_SERVER_ERROR);
+        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, INTERNAL_SERVER_ERROR,
+                Unpooled.wrappedBuffer(cause.getMessage().getBytes()));
         response.headers()
                 .set(HttpHeaderNames.CONTENT_TYPE, "text/plain")
                 .set(HttpHeaderNames.CONTENT_LENGTH, response.content().readableBytes());
