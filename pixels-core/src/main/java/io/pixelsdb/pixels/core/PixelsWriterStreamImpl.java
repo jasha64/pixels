@@ -19,10 +19,7 @@
  */
 package io.pixelsdb.pixels.core;
 
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufAllocator;
-import io.netty.buffer.PooledByteBufAllocator;
-import io.netty.buffer.Unpooled;
+import io.netty.buffer.*;
 import io.pixelsdb.pixels.common.utils.ConfigFactory;
 import io.pixelsdb.pixels.common.utils.Constants;
 import io.pixelsdb.pixels.core.encoding.EncodingLevel;
@@ -92,7 +89,7 @@ public class PixelsWriterStreamImpl implements PixelsWriter
     /**
      * The byte buffer padded to each column chunk for alignment.
      */
-    private static final byte[] CHUNK_PADDING_BUFFER;
+    private static final ByteBuf CHUNK_PADDING_BUFFER;
 
     static
     {
@@ -107,7 +104,10 @@ public class PixelsWriterStreamImpl implements PixelsWriter
         }
         CHUNK_ALIGNMENT = Integer.parseInt(ConfigFactory.Instance().getProperty("column.chunk.alignment"));
         checkArgument(CHUNK_ALIGNMENT >= 0, "column.chunk.alignment must >= 0");
-        CHUNK_PADDING_BUFFER = new byte[CHUNK_ALIGNMENT];
+        CHUNK_PADDING_BUFFER = Unpooled.buffer(CHUNK_ALIGNMENT);
+        for (int i = 0; i < CHUNK_PADDING_BUFFER.capacity(); i++) {
+            CHUNK_PADDING_BUFFER.writeByte(0);
+        }
     }
 
     /**
@@ -149,7 +149,8 @@ public class PixelsWriterStreamImpl implements PixelsWriter
     private final int partitionId;
 
     ByteBufAllocator byteBufAllocator = PooledByteBufAllocator.DEFAULT;
-    private ByteBuf byteBuf;
+    private final ByteBuf streamHeaderByteBuf;  // XXX: Put it in the class for now to avoid reference counting issues.
+    private CompositeByteBuf byteBuf;
     /**
      * DESIGN: We only translate fileName to URI when we need to send a row group to the server, rather than at
      *  construction time. This is because the getPort() call is blocking, and so it's better to postpone it as much as
@@ -259,7 +260,7 @@ public class PixelsWriterStreamImpl implements PixelsWriter
             columnWriters[i] = newColumnWriter(children.get(i), columnWriterOption);
         }
 
-        this.byteBuf = byteBufAllocator.buffer();
+        this.streamHeaderByteBuf = byteBufAllocator.buffer();
         this.uri = uri;
         this.fileName = fileName;
         this.uris = fileNames == null ? null : fileNames.stream().map(URI::create).collect(Collectors.toList());
@@ -587,10 +588,12 @@ public class PixelsWriterStreamImpl implements PixelsWriter
                         .addHeader(CONNECTION, CLOSE)
                         .build();
 
-//                outstandingHTTPRequestSemaphore.acquire();
+                outstandingHTTPRequestSemaphore.acquire();
                 httpClient.executeRequest(req);
             }
 
+            // todo: consider starting a new thread to wait and close the writer
+            outstandingHTTPRequestSemaphore.acquire();  // must wait for the last request to finish
             for (ColumnWriter cw : columnWriters)
             {
                 cw.close();
@@ -598,10 +601,7 @@ public class PixelsWriterStreamImpl implements PixelsWriter
             columnWriterService.shutdown();
             columnWriterService.shutdownNow();
 
-            if (byteBuf.refCnt() > 0)
-            {
-                byteBuf.release();
-            }
+            httpClient.close();
         }
         catch (Exception e)
         {
@@ -609,13 +609,30 @@ public class PixelsWriterStreamImpl implements PixelsWriter
         }
     }
 
+    /**
+     * Be very careful when working with composite buffers.
+     * Do not simultaneously use `.writeBytes()` (or any other write methdos) and `.addComponent()`; this does not work as expected, and instead,
+     *  the `.writeBytes()` will write to the last *allocated* component buffer (auto allocated when calling `.writeBytes()`),
+     *  which is not necessarily the last position corresponding to the writerIndex of the composite buffer.
+     * Also, using `.setLong()` or other set methods might not take effect on the composite buffer (see below).
+     */
     private void writeRowGroup() throws IOException
     {
+        // Must ensure there is no concurrent access to every component in the composite buffer, including
+        //  the column writers. So we acquire the semaphore in the beginning of the method.
+        try {
+            outstandingHTTPRequestSemaphore.acquire();
+        } catch (InterruptedException e) {
+            logger.error("interrupted when acquiring semaphore", e);
+        }
+
+        this.byteBuf = byteBufAllocator.compositeBuffer();
         // XXX: Now that we have each worker pass the schema in a separate packet in partitioned mode, it is no longer
         //  necessary to add a stream header to every packet. We can modify this block of code.
         if (isFirstRowGroup || partitioned)  // if (isFirstRowGroup)
         {
             writeStreamHeader();
+            byteBuf.addComponent(true, streamHeaderByteBuf);
             isFirstRowGroup = false;
         }
 
@@ -630,11 +647,38 @@ public class PixelsWriterStreamImpl implements PixelsWriter
             writer.flush();
         }
 
-        // write and flush row group content
+        //// write and flush row group content
         /**
          * Currently, we use long to store row group data length in our ByteBuf,
          * but we do not really support row groups that has data length exceeding int32, limited by ByteBuf.
          */
+
+        // First of all, calculate the row group data length, because we need to write it in the beginning of the `byteBuf`.
+        // It could happen that the component buffers in `byteBuf` got automatically consolidated by Netty, i.e.
+        //  already copied and written elsewhere inside the `byteBuf`, and so calling `.setLong()` on the component
+        //  might not be reflected in `byteBuf` and not be the actual value written to the output stream.
+        // Therefore, we have to calculate the row group data length first before adding it as a component to the `byteBuf`.
+        long rowGroupDataLength = Long.BYTES;
+        int tryAlign = 0;
+        while (CHUNK_ALIGNMENT != 0 && rowGroupDataLength % CHUNK_ALIGNMENT != 0 && tryAlign++ < 2)
+        {
+            int alignBytes = (int) (CHUNK_ALIGNMENT - rowGroupDataLength % CHUNK_ALIGNMENT);
+            rowGroupDataLength += alignBytes;
+        }
+
+        for (int i = 0; i < columnWriters.length; i++)
+        {
+            ColumnWriter writer = columnWriters[i];
+            rowGroupDataLength += writer.getColumnChunkSize();
+            /* TODO: writer.reset() does not work for partitioned file writing, fix it later.
+             * The possible reason is that: when the file is partitioned, the last stride of a row group
+             * (a.k.a., partition) is likely not full (length < pixelsStride), thus if the writer is not
+             * reset correctly, the strides of the next row group will not be written correctly.
+             * We temporarily fix this problem by creating a new column writer for each row group.
+             */
+            // writer.reset();  // This seems to be slower than creating a new writer for each row group.
+        }
+
         long recordedRowGroupDataLen = 0;
         curRowGroupOffset = byteBuf.writerIndex();
         if (curRowGroupOffset != -1)
@@ -646,17 +690,18 @@ public class PixelsWriterStreamImpl implements PixelsWriter
              */
 
             // Issue #519: make sure to start writing the column chunks in the row group from an aligned offset.
-            int tryAlign = 0;
+            tryAlign = 0;
             long writtenBytesBefore = writtenBytes;
             int rowGroupDataLenPos = byteBuf.writerIndex();
-            byteBuf.writeLong(0); // write a placeholder for row group data length
+            ByteBuf rowGroupDataLenBuf = Unpooled.buffer();  rowGroupDataLenBuf.writeLong(rowGroupDataLength);  rowGroupDataLenBuf.retain();
+            byteBuf.addComponent(true, rowGroupDataLenBuf);
             writtenBytes += Long.BYTES;
             curRowGroupOffset = byteBuf.writerIndex();
 
             while (CHUNK_ALIGNMENT != 0 && curRowGroupOffset % CHUNK_ALIGNMENT != 0 && tryAlign++ < 2)
             {
                 int alignBytes = (int) (CHUNK_ALIGNMENT - curRowGroupOffset % CHUNK_ALIGNMENT);
-                byteBuf.writeBytes(CHUNK_PADDING_BUFFER, 0, alignBytes);
+                if (alignBytes != 0) byteBuf.addComponent(true, CHUNK_PADDING_BUFFER.slice(0, alignBytes));
                 writtenBytes += alignBytes;
                 curRowGroupOffset = byteBuf.writerIndex();
             }
@@ -679,15 +724,19 @@ public class PixelsWriterStreamImpl implements PixelsWriter
                 curRowGroupEncoding.addColumnChunkEncodings(writer.getColumnChunkEncoding().build());
                 // DESIGN: ColumnChunkEncoding is final. Also moved it from rowGroup footer to header
 
-                byteBuf.writeBytes(Unpooled.wrappedBuffer(columnChunkBuffer));
+                byteBuf.addComponent(true, Unpooled.wrappedBuffer(columnChunkBuffer));
                 writtenBytes += columnChunkBuffer.length;
-                // add align bytes to make sure the column size is the multiple of fsBlockSize
-                if (CHUNK_ALIGNMENT != 0 && columnChunkBuffer.length % CHUNK_ALIGNMENT != 0)
-                {
-                    int alignBytes = CHUNK_ALIGNMENT - columnChunkBuffer.length % CHUNK_ALIGNMENT;
-                    byteBuf.writeBytes(CHUNK_PADDING_BUFFER, 0, alignBytes);
-                    writtenBytes += alignBytes;
-                }
+                // obsolete: add align bytes to make sure the column size is the multiple of fsBlockSize
+                // In the streaming mode, we do not use physical storage to store the intermediate data,
+                //  and so we no longer need to align the column chunks to the fsBlockSize.
+                // Besides, adding too many (in our tests 256) components to the composite buffer can trigger an automatic
+                //  consolidation, which involves memory copy and is not efficient.
+                // if (CHUNK_ALIGNMENT != 0 && columnChunkBuffer.length % CHUNK_ALIGNMENT != 0)
+                // {
+                //     int alignBytes = CHUNK_ALIGNMENT - columnChunkBuffer.length % CHUNK_ALIGNMENT;
+                //     if (alignBytes != 0) byteBuf.addComponent(true, CHUNK_PADDING_BUFFER.slice(0, alignBytes));
+                //     writtenBytes += alignBytes;
+                // }
             }
 
             // write row group data len
@@ -696,7 +745,6 @@ public class PixelsWriterStreamImpl implements PixelsWriter
             {
                 logger.warn("Recorded rowGroupDataLen is not equal to accumulated writtenBytes");
             }
-            byteBuf.setLong(rowGroupDataLenPos, recordedRowGroupDataLen);
         }
         else
         {
@@ -704,41 +752,6 @@ public class PixelsWriterStreamImpl implements PixelsWriter
         }
 
         // update index and stats
-        long rowGroupDataLength = Long.BYTES;
-        int tryAlign = 0;
-        while (CHUNK_ALIGNMENT != 0 && rowGroupDataLength % CHUNK_ALIGNMENT != 0 && tryAlign++ < 2)
-        {
-            int alignBytes = (int) (CHUNK_ALIGNMENT - rowGroupDataLength % CHUNK_ALIGNMENT);
-            rowGroupDataLength += alignBytes;
-        }
-        for (int i = 0; i < columnWriters.length; i++)
-        {
-            ColumnWriter writer = columnWriters[i];
-            rowGroupDataLength += writer.getColumnChunkSize();
-            if (CHUNK_ALIGNMENT != 0 && rowGroupDataLength % CHUNK_ALIGNMENT != 0)
-            {
-                /*
-                 * Issue #519:
-                 * This line must be consistent with how column chunks are padded above.
-                 * If we only pad after each column chunk when writing it into the physical writer
-                 * without checking the alignment of the current position of the physical writer,
-                 * then we should not consider curRowGroupOffset when calculating the alignment here.
-                 */
-                rowGroupDataLength += CHUNK_ALIGNMENT - rowGroupDataLength % CHUNK_ALIGNMENT;
-            }
-            /* TODO: writer.reset() does not work for partitioned file writing, fix it later.
-             * The possible reason is that: when the file is partitioned, the last stride of a row group
-             * (a.k.a., partition) is likely not full (length < pixelsStride), thus if the writer is not
-             * reset correctly, the strides of the next row group will not be written correctly.
-             * We temporarily fix this problem by creating a new column writer for each row group.
-             */
-            // writer.reset();  // This seems to be slower than creating a new writer for each row group.
-            columnWriters[i] = newColumnWriter(children.get(i), columnWriterOption);
-        }
-
-        if (rowGroupDataLength != recordedRowGroupDataLen)
-            logger.warn("The calculated rowGroupDataLength is not equal to the recorded value");
-
         if (partitioned)
         {
             // partitionColumnIds has been checked to be present in the builder.
@@ -759,10 +772,12 @@ public class PixelsWriterStreamImpl implements PixelsWriter
         PixelsStreamProto.StreamRowGroupFooter rowGroupFooter = rowGroupFooterBuilder.build();
 
         // write and flush row group footer
+        ByteBuf rowGroupFooterBuf = Unpooled.buffer();
         byte[] footerBuffer = rowGroupFooter.toByteArray();
-        curRowGroupFooterOffset = byteBuf.writerIndex();
-        byteBuf.writeInt(footerBuffer.length);
-        byteBuf.writeBytes(footerBuffer, 0, footerBuffer.length);
+        rowGroupFooterBuf.writeInt(footerBuffer.length);
+        rowGroupFooterBuf.writeBytes(footerBuffer);
+        rowGroupFooterBuf.retain();
+        byteBuf.addComponent(true, rowGroupFooterBuf);
         writtenBytes += footerBuffer.length;
 
         this.fileRowNum += curRowGroupNumOfRows;
@@ -781,100 +796,104 @@ public class PixelsWriterStreamImpl implements PixelsWriter
                 .addHeader("X-Partition-Id", String.valueOf(partitionId))
                 .addHeader(CONTENT_TYPE, "application/x-protobuf")
                 .addHeader(CONTENT_LENGTH, byteBuf.readableBytes())
-                .addHeader(CONNECTION, partitioned || partitionId == PARTITION_ID_SCHEMA_WRITER ? CLOSE : "keep-alive")
+                .addHeader(CONNECTION, partitionId == PARTITION_ID_SCHEMA_WRITER ? CLOSE : "keep-alive")
                 .build();
-        byteBuf = byteBufAllocator.buffer();
-        // If it's partitioned mode, we send only 1 row group to each upper-level worker, and so we set the connection to
-        //  CLOSE after sending the row group.
-        // If it's a schema writer, we should also close the connection after sending the row group.
+
+        if (rowGroupDataLength != recordedRowGroupDataLen)
+            logger.warn("The calculated rowGroupDataLength is not equal to the recorded value");
 
         // DESIGN: We use a retry here to retry the HTTP request in case of connection failure,
         //  because the HTTP server may not be ready when the client tries to connect.
-        new Thread(() -> {
-            try
+        try
+        {
+            int maxAttempts = 3000;
+            long backoffMillis = 100;
+            int attempt = 0;
+            boolean success = false;
+
+            while (!success)
             {
-//            outstandingHTTPRequestSemaphore.acquire();
-                int maxAttempts = 3000;
-                long backoffMillis = 100;
-                int attempt = 0;
-                boolean success = false;
-
-                while (!success)
+                try
                 {
-                    try
+                    CompletableFuture<Response> future = new CompletableFuture<>();
+                    httpClient.executeRequest(req, new AsyncCompletionHandler<Response>()
                     {
-                        CompletableFuture<Response> future = new CompletableFuture<>();
-                        httpClient.executeRequest(req, new AsyncCompletionHandler<Response>()
-                        {
 
-                            @Override
-                            public Response onCompleted(Response response) throws Exception
+                        @Override
+                        public Response onCompleted(Response response) throws Exception
+                        {
+                            for (int i = 0; i < columnWriters.length; i++)
                             {
-                                oldByteBuf.release();
-                                future.complete(response);
-                                if (response.getStatusCode() != 200)
-                                {
-                                    throw new IOException("Failed to send row group to server, status code: " +
-                                            response.getStatusCode());
-                                }
-//                            outstandingHTTPRequestSemaphore.release();
-                                return response;
+                                columnWriters[i] = newColumnWriter(children.get(i), columnWriterOption);
                             }
 
-                            @Override
-                            public void onThrowable(Throwable t)
+                            future.complete(response);
+                            if (response.getStatusCode() != 200)
                             {
-                                if (t instanceof java.net.ConnectException)
-                                {
-                                    future.completeExceptionally(t);
-                                } else
-                                {
-                                    logger.error(t.getMessage());
-//                                outstandingHTTPRequestSemaphore.release();
-                                    oldByteBuf.release();
-                                    future.completeExceptionally(t);
-                                }
+                                throw new IOException("Failed to send row group to server, status code: " +
+                                        response.getStatusCode());
                             }
-                        });
 
-                        future.get();
-                        // If no exception, the request was successful, so we break out of the loop
-                        success = true;
-                    } catch (ExecutionException e)
-                    {
-                        Throwable cause = e.getCause();
-                        if (cause instanceof java.net.ConnectException)
+                            outstandingHTTPRequestSemaphore.release();
+                            return response;
+                        }
+
+                        @Override
+                        public void onThrowable(Throwable t)
                         {
-                            attempt++;
-                            if (attempt < maxAttempts)
+                            if (t instanceof java.net.ConnectException)
                             {
-                                try
-                                {
-                                    Thread.sleep(backoffMillis);
-                                } catch (InterruptedException interruptedException)
-                                {
-                                    Thread.currentThread().interrupt();
-                                    throw new RuntimeException("Retry interrupted", interruptedException);
-                                }
+                                future.completeExceptionally(t);
                             } else
                             {
-                                throw new RuntimeException("Max retry attempts reached. Failing the request.", cause);
+                                for (int i = 0; i < columnWriters.length; i++)
+                                {
+                                    columnWriters[i] = newColumnWriter(children.get(i), columnWriterOption);
+                                }
+                                logger.error(t.getMessage());
+                                outstandingHTTPRequestSemaphore.release();
+                                future.completeExceptionally(t);
+                            }
+                        }
+                    });
+
+                    future.get();
+                    // If no exception, the request was successful, so we break out of the loop
+                    success = true;
+                } catch (ExecutionException e)
+                {
+                    Throwable cause = e.getCause();
+                    if (cause instanceof java.net.ConnectException)
+                    {
+                        attempt++;
+                        if (attempt < maxAttempts)
+                        {
+                            try
+                            {
+                                Thread.sleep(backoffMillis);
+                            } catch (InterruptedException interruptedException)
+                            {
+                                Thread.currentThread().interrupt();
+                                throw new RuntimeException("Retry interrupted", interruptedException);
                             }
                         } else
                         {
-                            throw new RuntimeException("Non-retryable error occurred", cause);
+                            throw new RuntimeException("Max retry attempts reached. Failing the request.", cause);
                         }
-                    } catch (InterruptedException e)
+                    } else
                     {
-                        Thread.currentThread().interrupt();
-                        throw new RuntimeException("Retry interrupted", e);
+                        throw new RuntimeException("Non-retryable error occurred", cause);
                     }
+                } catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Retry interrupted", e);
                 }
-            } catch (Throwable e)
-            {
-                logger.error("error when sending data", e);
             }
-        }).start();
+        } catch (Throwable e)
+        {
+            logger.error("error when sending data", e);
+        }
         this.rowGroupNum++;
         // In `getNumRowGroup()`, we use rowGroupNum to count the number of row groups sent. So we need to increment
         //  `rowGroupNum` at the end of this method.
@@ -960,6 +979,8 @@ public class PixelsWriterStreamImpl implements PixelsWriter
 
     private void writeStreamHeader()
     {
+        streamHeaderByteBuf.clear();
+
         // build streamHeader
         PixelsStreamProto.StreamHeader.Builder streamHeaderBuilder = PixelsStreamProto.StreamHeader.newBuilder();
         writeTypes(streamHeaderBuilder, schema);
@@ -975,21 +996,21 @@ public class PixelsWriterStreamImpl implements PixelsWriter
 
         // write and flush streamHeader
         byte[] magicBytes = FILE_MAGIC.getBytes();
-        byteBuf.writeBytes(magicBytes);
-        byteBuf.writeInt(streamHeaderLength);
-        byteBuf.writeBytes(streamHeader.toByteArray());
+        streamHeaderByteBuf.writeBytes(magicBytes);
+        streamHeaderByteBuf.writeInt(streamHeaderLength);
+        streamHeaderByteBuf.writeBytes(streamHeader.toByteArray());
         writtenBytes += magicBytes.length + streamHeaderLength + Integer.BYTES;
 
         int paddingLength = (8 - (magicBytes.length + Integer.BYTES + streamHeaderLength) % 8) % 8;  // Can use '&7'
         byte[] paddingBytes = new byte[paddingLength];
-        byteBuf.writeBytes(paddingBytes);
+        streamHeaderByteBuf.writeBytes(paddingBytes);
         writtenBytes += paddingLength;
 
         // ensure the next member (row group data length) is aligned to CHUNK_ALIGNMENT
-        if (CHUNK_ALIGNMENT != 0 && byteBuf.writerIndex() % CHUNK_ALIGNMENT != 0)
+        if (CHUNK_ALIGNMENT != 0 && streamHeaderByteBuf.writerIndex() % CHUNK_ALIGNMENT != 0)
         {
-            int alignBytes = CHUNK_ALIGNMENT - byteBuf.writerIndex() % CHUNK_ALIGNMENT;
-            byteBuf.writeBytes(CHUNK_PADDING_BUFFER, 0, alignBytes);
+            int alignBytes = CHUNK_ALIGNMENT - streamHeaderByteBuf.writerIndex() % CHUNK_ALIGNMENT;
+            streamHeaderByteBuf.writeBytes(CHUNK_PADDING_BUFFER, 0, alignBytes);
             writtenBytes += alignBytes;
         }
     }
