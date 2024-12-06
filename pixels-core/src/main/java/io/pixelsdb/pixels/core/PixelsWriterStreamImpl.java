@@ -824,7 +824,6 @@ public class PixelsWriterStreamImpl implements PixelsWriter
                             @Override
                             public void onThrowable(Throwable t)
                             {
-                                oldByteBuf.release();
                                 if (t instanceof java.net.ConnectException)
                                 {
                                     future.completeExceptionally(t);
@@ -832,6 +831,7 @@ public class PixelsWriterStreamImpl implements PixelsWriter
                                 {
                                     logger.error(t.getMessage());
 //                                outstandingHTTPRequestSemaphore.release();
+                                    oldByteBuf.release();
                                     future.completeExceptionally(t);
                                 }
                             }
